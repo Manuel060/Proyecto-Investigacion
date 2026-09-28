@@ -1,0 +1,11 @@
+# Archivos intermedios de R Markdown / LaTeX
+*.log
+*.aux
+*.out
+*.toc
+*.tex
+*_files/
+*_cache/
+.Rhistory
+.RData
+.Rproj.user/

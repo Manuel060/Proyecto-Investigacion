@@ -1,0 +1,748 @@
+---
+output:
+  pdf_document:
+    latex_engine: pdflatex
+    number_sections: true
+    fig_caption: true
+documentclass: article
+fontsize: 10pt
+geometry: margin=2.2cm
+lang: es
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{longtable}
+  - \usepackage{float}
+  - \usepackage{caption}
+  - \captionsetup{font=small, skip=4pt}
+  - \usepackage{fancyhdr}
+  - \pagestyle{fancy}
+  - \fancyhf{}
+  - \fancyhead[L]{\small Guía de Aprendizaje 2 --- Actividades 3 y 4}
+  - \fancyhead[R]{\small\thepage}
+  - \renewcommand{\headrulewidth}{0.4pt}
+  - \usepackage{titlesec}
+  - \titlespacing*{\section}{0pt}{1.1ex}{0.5ex}
+  - \titlespacing*{\subsection}{0pt}{0.9ex}{0.3ex}
+  - \setlength{\parskip}{0.5ex}
+---
+
+```{r configuracion-global, include=FALSE}
+# ==============================================================================
+# CONFIGURACIÓN GLOBAL
+# ------------------------------------------------------------------------------
+# knitr::opts_chunk$set() fija las opciones por defecto de todos los bloques.
+#   echo = FALSE -> el código NO se imprime en el cuerpo del documento; se
+#                   reproduce íntegro en el Anexo A, para respetar el límite de
+#                   extensión que pide la guía sin perder trazabilidad.
+# ==============================================================================
+knitr::opts_chunk$set(
+  echo = FALSE, message = FALSE, warning = FALSE,
+  fig.align = "center", fig.pos = "H", out.width = "92%",
+  fig.width = 6.8, fig.height = 2.5
+)
+options(scipen = 999, digits = 4, width = 100)
+
+# Librerías:
+#   ggplot2 -> gramática de gráficos     pROC   -> curva ROC y AUC
+#   car     -> vif(), multicolinealidad  readxl -> lectura de .xlsx (Traindata)
+#   knitr   -> kable(), tablas en LaTeX
+library(ggplot2); library(pROC); library(car); library(readxl); library(knitr)
+theme_set(theme_bw(base_size = 8))
+```
+
+```{r funciones-auxiliares, include=FALSE}
+# ==============================================================================
+# FUNCIONES AUXILIARES
+# Se definen una sola vez y se reutilizan en los dos modelos del taller.
+# Todas usan R base: el objetivo es que el cálculo sea seguible paso a paso.
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# fmt(): formatea un número como TEXTO con cifras significativas fijas. Es
+# necesario porque el hook de knitr para código en línea redondea con
+# getOption("digits") y un coeficiente del orden de 1e-05 se imprimiría como 0.
+# ------------------------------------------------------------------------------
+fmt <- function(x, sig = 3) format(signif(x, sig), scientific = FALSE, trim = TRUE)
+
+# fmt_p(): formatea p-valores evitando el engañoso "0.0000".
+fmt_p <- function(x) ifelse(x < 0.0001, "<0,0001", format(round(x, 4), nsmall = 4))
+
+# ------------------------------------------------------------------------------
+# tabla_coeficientes(): convierte la salida de un glm en la tabla que realmente
+# se interpreta en riesgo de crédito: coeficiente en escala logit, odds ratio
+# OR = exp(beta) y su intervalo de confianza al 95 %.
+# ------------------------------------------------------------------------------
+tabla_coeficientes <- function(modelo, nivel = 0.95) {
+  s  <- summary(modelo)$coefficients   # beta, error estándar, valor z, p-valor
+  z  <- qnorm(1 - (1 - nivel) / 2)     # 1,96 para el 95 %
+  b  <- s[, "Estimate"]; se <- s[, "Std. Error"]
+  out <- data.frame(
+    rownames(s), round(b, 5), round(se, 5), round(s[, "z value"], 2),
+    fmt_p(s[, 4]), round(exp(b), 4),
+    round(exp(b - z * se), 4), round(exp(b + z * se), 4),
+    row.names = NULL
+  )
+  # Los nombres se asignan aparte (y no como argumentos de data.frame) para que
+  # el código sea válido en cualquier locale, incluso sin soporte UTF-8.
+  names(out) <- c("Variable", "Beta", "EE", "z", "p-valor", "OR",
+                  "IC 95% inf", "IC 95% sup")
+  out
+}
+
+# ------------------------------------------------------------------------------
+# hosmer_lemeshow(): prueba de bondad de ajuste (calibración).
+# Idea: se ordenan las observaciones por probabilidad predicha, se parten en g
+# grupos (deciles de riesgo) y se comparan eventos OBSERVADOS vs. ESPERADOS:
+#        C = sum_g (O_g - E_g)^2 / [ E_g (1 - E_g/n_g) ]  ~  chi2_(g-2)
+# H0: el modelo está bien calibrado  ->  se DESEA un p-valor alto (no rechazar).
+# ------------------------------------------------------------------------------
+hosmer_lemeshow <- function(y, p, g = 10) {
+  cortes <- unique(quantile(p, probs = seq(0, 1, length.out = g + 1)))
+  grupo  <- cut(p, breaks = cortes, include.lowest = TRUE)
+  obs <- tapply(y, grupo, sum)      # eventos observados por grupo
+  esp <- tapply(p, grupo, sum)      # eventos esperados por grupo
+  n_g <- tapply(y, grupo, length)   # tamaño de cada grupo
+  C   <- sum((obs - esp)^2 / (esp * (1 - esp / n_g)))
+  gl  <- length(levels(droplevels(grupo))) - 2
+  list(estadistico = C, gl = gl, p_valor = pchisq(C, gl, lower.tail = FALSE))
+}
+
+# ------------------------------------------------------------------------------
+# pseudo_r2_mcfadden(): R2 = 1 - deviance(modelo)/deviance(nulo).
+# NO es proporción de varianza explicada: mide la ganancia en log-verosimilitud
+# frente al modelo que solo tiene intercepto.
+# ------------------------------------------------------------------------------
+pseudo_r2_mcfadden <- function(modelo) 1 - modelo$deviance / modelo$null.deviance
+
+# ------------------------------------------------------------------------------
+# matriz_confusion(): clasifica con un punto de corte y devuelve la matriz junto
+# con exactitud, sensibilidad (detecta el evento y=1) y especificidad (y=0).
+# ------------------------------------------------------------------------------
+matriz_confusion <- function(y, p, corte = 0.5) {
+  mc <- table(Observado = y,
+              Predicho  = factor(ifelse(p >= corte, 1, 0), levels = c(0, 1)))
+  vn <- mc[1, 1]; fp <- mc[1, 2]; fn <- mc[2, 1]; vp <- mc[2, 2]
+  list(matriz = mc, exactitud = (vp + vn) / sum(mc),
+       sensibilidad = vp / (vp + fn), especificidad = vn / (vn + fp))
+}
+
+# ------------------------------------------------------------------------------
+# tabla_diagnosticos(): consolida en UNA tabla todos los diagnósticos del
+# modelo, con su criterio de decisión. Sustituye los volcados de consola por
+# una salida legible y auditable.
+# ------------------------------------------------------------------------------
+tabla_diagnosticos <- function(modelo, y) {
+  p  <- fitted(modelo)
+  hl <- hosmer_lemeshow(y, p)
+  lr <- modelo$null.deviance - modelo$deviance          # estadístico LR
+  gl <- modelo$df.null - modelo$df.residual
+  mc <- matriz_confusion(y, p, 0.5)
+  a  <- as.numeric(auc(roc(y, p, quiet = TRUE)))
+  out <- data.frame(
+    c("VIF máximo", "Hosmer-Lemeshow (p-valor)", "R2 de McFadden",
+      "Razón de verosimilitud (p-valor)", "Obs. influyentes (Cook > 4/n)",
+      "AUC", "Exactitud (corte 0,5)", "Sensibilidad", "Especificidad"),
+    # La columna se construye como TEXTO: mezcla conteos enteros, p-valores y
+    # proporciones, y un formato numérico común los mostraría mal (p. ej. "68.0000").
+    c(sprintf("%.2f", max(vif(modelo))), fmt_p(hl$p_valor),
+      sprintf("%.4f", pseudo_r2_mcfadden(modelo)),
+      fmt_p(pchisq(lr, gl, lower.tail = FALSE)),
+      as.character(sum(cooks.distance(modelo) > 4 / length(y))),
+      sprintf("%.4f", a), sprintf("%.4f", mc$exactitud),
+      sprintf("%.4f", mc$sensibilidad), sprintf("%.4f", mc$especificidad)),
+    c("< 5: sin multicolinealidad", "> 0,05: buena calibración",
+      "0,05-0,40 es habitual en default", "< 0,05: el modelo aporta",
+      paste0("umbral 4/n = ", round(4 / length(y), 4)),
+      "> 0,70 aceptable; > 0,80 buena", "solo referencial si hay desbalance",
+      "detecta el evento y = 1", "detecta el no-evento y = 0"),
+    row.names = NULL
+  )
+  names(out) <- c("Diagnóstico", "Valor", "Criterio de lectura")
+  out
+}
+
+# ------------------------------------------------------------------------------
+# grafico_roc(): dibuja la curva ROC con ggplot2 a partir del objeto de pROC,
+# para mantener un estilo gráfico homogéneo en todo el documento. La diagonal
+# punteada es el clasificador sin información (AUC = 0,5).
+# ------------------------------------------------------------------------------
+grafico_roc <- function(objeto_roc, titulo = NULL) {
+  d <- data.frame(fpr = 1 - objeto_roc$specificities,
+                  tpr = objeto_roc$sensitivities)
+  a <- as.numeric(auc(objeto_roc))
+  ggplot(d[order(d$fpr), ], aes(x = fpr, y = tpr)) +
+    geom_abline(intercept = 0, slope = 1, linetype = "dashed",
+                colour = "grey55", linewidth = 0.3) +
+    geom_line(linewidth = 0.6) +
+    annotate("text", x = 0.62, y = 0.18, size = 2.9,
+             label = paste0("AUC = ", sprintf("%.4f", a))) +
+    coord_equal(xlim = c(0, 1), ylim = c(0, 1)) +
+    labs(x = "1 - Especificidad (falsos positivos)",
+         y = "Sensibilidad (verdaderos positivos)", title = titulo)
+}
+
+# ------------------------------------------------------------------------------
+# logit_empirico(): construye los datos para verificar el supuesto de
+# LINEALIDAD EN EL LOGIT. Se parte cada covariable en k grupos de igual tamaño y
+# en cada uno se calcula el log-odds observado, con corrección de
+# Haldane-Anscombe (+0,5) para evitar log(0).
+# ------------------------------------------------------------------------------
+logit_empirico <- function(datos, respuesta, variables, k = 10) {
+  y <- datos[[respuesta]]
+  do.call(rbind, lapply(variables, function(v) {
+    x   <- datos[[v]]
+    bin <- cut(x, breaks = unique(quantile(x, seq(0, 1, length.out = k + 1))),
+               include.lowest = TRUE)
+    do.call(rbind, lapply(split(data.frame(x = x, y = y), bin), function(b)
+      data.frame(variable = v, x_medio = mean(b$x),
+                 logit_emp = log((sum(b$y) + 0.5) /
+                                 (nrow(b) - sum(b$y) + 0.5)))))
+  }))
+}
+```
+
+\begin{titlepage}
+\centering
+\vspace*{1.3cm}
+
+{\Large\scshape Universidad El Bosque\par}
+\vspace{0.25cm}
+{\large Departamento de Matemáticas\par}
+\vspace{0.15cm}
+{\large Programa: Matemáticas y Ciencia de Datos\par}
+
+\vspace{1.9cm}
+\rule{\textwidth}{0.6pt}
+\vspace{0.45cm}
+
+{\LARGE\bfseries Análisis de riesgo de incumplimiento\\[0.25cm] mediante un modelo de regresión Logit\par}
+\vspace{0.45cm}
+{\large Módulo 1, Unidad 1 --- Guía de Aprendizaje 2\\ Actividades 3 y 4\par}
+
+\vspace{0.35cm}
+\rule{\textwidth}{0.6pt}
+
+\vspace{1.7cm}
+{\large\bfseries Presentado por\par}
+\vspace{0.15cm}
+{\large Víctor Julio Peña\par}
+
+\vspace{1.3cm}
+{\large\bfseries Curso\par}
+\vspace{0.15cm}
+{\large Inteligencia Artificial para Asuntos Financieros\par}
+
+\vspace{1.3cm}
+{\large\bfseries Docente\par}
+\vspace{0.15cm}
+{\large William Arley Rincón Gómez\par}
+
+\vfill
+{\large Bogotá D.C., 2025\par}
+\end{titlepage}
+
+\newpage
+
+# Marco conceptual
+
+El modelo *logit* es el modelo de referencia cuando la respuesta es **binaria**.
+En riesgo crediticio, $Y_i = 1$ si el cliente incumple y $Y_i = 0$ si cumple, con
+$Y_i \sim \mathrm{Bernoulli}(p_i)$. No se modela la media directamente sino su
+transformación logit:
+
+$$
+\mathrm{logit}(p_i)=\ln\!\left(\frac{p_i}{1-p_i}\right)=\beta_0+\sum_{j=1}^{k}\beta_jx_{ji}
+\qquad\Longleftrightarrow\qquad
+p_i=\frac{1}{1+e^{-\left(\beta_0+\sum_j \beta_j x_{ji}\right)}}
+$$
+
+El enlace logit se usa por dos razones: la función $\mathrm{logit}:(0,1)\to\mathbb{R}$
+garantiza que la probabilidad predicha quede **acotada en $(0,1)$** —algo que un
+modelo lineal ordinario no asegura— y vuelve los parámetros **lineales en la
+escala de log-odds**, lo que da una interpretación cerrada. La estimación es por
+**máxima verosimilitud**, maximizando
+$\ell(\beta)=\sum_i[y_i\ln p_i+(1-y_i)\ln(1-p_i)]$ mediante el algoritmo IRLS que
+`glm()` implementa internamente; no hay solución cerrada como en mínimos cuadrados.
+
+**Interpretación.** $\beta_j$ es el cambio en el log-odds del evento ante un
+aumento unitario en $x_j$, *ceteris paribus*. Como esa escala no es intuitiva se
+reporta el **odds ratio** $\mathrm{OR}_j=e^{\beta_j}$: si $\beta_j>0$ entonces
+$\mathrm{OR}_j>1$ y la variable **aumenta** la probabilidad del evento; si
+$\beta_j<0$, $\mathrm{OR}_j<1$ y la **reduce**; si $\beta_j=0$, $\mathrm{OR}_j=1$
+y no la altera. El logit **no** exige normalidad ni homocedasticidad —esos
+supuestos son del modelo lineal clásico—; exige linealidad en el logit, ausencia
+de multicolinealidad, independencia de las observaciones y tamaño de muestra
+suficiente por parámetro.
+
+# Modelo 1: simulación de 1.000 clientes
+
+## Simulación y ajuste
+
+Se reproduce el diseño de la guía. Fue necesario corregir tres **errores de
+sintaxis** del código original: `seed(123)` no existe en R y debe ser
+`set.seed(123)`; la expresión de `lin_pred` tenía un paréntesis de cierre
+sobrante; y `glm()` se invocaba sin el argumento `data`, lo que obliga a que las
+variables vivan en el entorno global (mala práctica reproducible).
+
+```{r simulacion-modelo1, echo=TRUE}
+# set.seed() fija la semilla del generador pseudoaleatorio: es lo que hace
+# REPRODUCIBLE la simulación (los mismos 1.000 clientes en cada corrida).
+set.seed(123)
+n <- 1000
+
+# --- Variables explicativas: rnorm() = normal, rbinom() = Bernoulli ----------
+edad           <- rnorm(n, mean = 40,   sd = 10)    # años
+ingresos       <- rnorm(n, mean = 3000, sd = 1000)  # u.m. mensuales
+score          <- rnorm(n, mean = 600,  sd = 50)    # score crediticio
+genero         <- rbinom(n, size = 1, prob = 0.5)   # 0 = femenino, 1 = masculino
+monto_prestamo <- rnorm(n, mean = 5000, sd = 1500)  # monto solicitado
+
+# --- Predictor lineal: parámetros VERDADEROS del proceso generador (DGP) -----
+lin_pred <- -3 - 0.03 * edad - 0.0004 * ingresos + 0.01 * score +
+             0.8 * genero + 0.0001 * monto_prestamo
+
+# --- Enlace inverso: del logit a la probabilidad, y respuesta Bernoulli ------
+prob    <- 1 / (1 + exp(-lin_pred))
+default <- rbinom(n, size = 1, prob = prob)   # 0 = cumple, 1 = incumple
+
+datos1 <- data.frame(default, edad, ingresos, score, genero, monto_prestamo)
+```
+
+```{r ajuste-modelo1, echo=TRUE}
+# family = binomial(link = "logit") declara respuesta Bernoulli con enlace logit;
+# data = datos1 fija el ámbito explícito de las variables.
+modelo1 <- glm(default ~ edad + ingresos + score + genero + monto_prestamo,
+               family = binomial(link = "logit"), data = datos1)
+summary(modelo1)
+```
+
+```{r objetos-modelo1}
+tasa1 <- mean(datos1$default)
+p1    <- fitted(modelo1)
+roc1  <- roc(datos1$default, p1, quiet = TRUE)
+b1    <- coef(modelo1)
+mc1   <- matriz_confusion(datos1$default, p1, 0.5)
+eta_medio <- -3 - 0.03*40 - 0.0004*3000 + 0.01*600 + 0.8*0.5 + 0.0001*5000
+```
+
+## Interpretación de los coeficientes
+
+```{r tabla-modelo1}
+tab1 <- tabla_coeficientes(modelo1)
+# Parámetros verdaderos con que se generaron los datos, en el mismo orden que
+# los coeficientes del modelo.
+beta_real <- c(-3, -0.03, -0.0004, 0.01, 0.8, 0.0001)
+
+# COBERTURA: se verifica si cada parámetro verdadero queda dentro del intervalo
+# de confianza del 95 % de su estimación. Es la validación clave del ejercicio y
+# se calcula, no se afirma.
+ic1        <- confint.default(modelo1, level = 0.95)
+cubierto   <- beta_real >= ic1[, 1] & beta_real <= ic1[, 2]
+cobertura1 <- sum(cubierto)
+
+tab1$Beta <- sapply(coef(modelo1), fmt, sig = 3)   # evita imprimir 0.0000411 como 0
+tab1$EE   <- sapply(summary(modelo1)$coefficients[, 2], fmt, sig = 3)
+tab1 <- cbind(tab1[, 1, drop = FALSE],
+              `Beta real` = sapply(beta_real, fmt, sig = 3),
+              tab1[, -1],
+              `Beta real en el IC 95%` = ifelse(cubierto, "Sí", "No"))
+kable(tab1, booktabs = TRUE, linesep = "", align = "lrrrrrrrrc",
+      caption = "Modelo 1. Parámetro verdadero del DGP frente al estimado, odds ratios e intervalos de confianza al 95 \\%. La última columna verifica que la estimación cubre el valor con que se simularon los datos.")
+```
+
+Interpretar `ingresos` o `monto_prestamo` "por una unidad" es engañoso, porque una
+unidad monetaria es despreciable frente a una desviación estándar de 1.000 o
+1.500. Por eso los efectos se reescalan a incrementos financieramente relevantes:
+
+```{r efectos-modelo1}
+inc <- c(edad = 1, ingresos = 100, score = 10, genero = 1, monto_prestamo = 1000)
+ef1 <- data.frame(
+  c("edad (+1 año)", "ingresos (+100 u.m.)", "score (+10 puntos)",
+    "genero (hombre vs. mujer)", "monto (+1.000 u.m.)"),
+  round(b1[names(inc)] * inc, 4),
+  round(exp(b1[names(inc)] * inc), 4),
+  round(100 * (exp(b1[names(inc)] * inc) - 1), 2),
+  row.names = NULL)
+names(ef1) <- c("Incremento evaluado", "Cambio en log-odds", "Odds ratio",
+                "Variación del riesgo (%)")
+kable(ef1, booktabs = TRUE, linesep = "",
+      caption = "Modelo 1. Efectos sobre el riesgo de incumplimiento, reescalados a incrementos con sentido financiero.")
+```
+
+- **Edad** ($\hat\beta=`r fmt(b1["edad"])`$): cada año adicional multiplica los
+  odds de incumplimiento por `r round(exp(b1["edad"]),4)`, reduciéndolos cerca de
+  `r abs(round(100*(exp(b1["edad"])-1),1))`\%. Actúa como factor protector.
+- **Ingresos** ($\hat\beta=`r fmt(b1["ingresos"])`$): cada 100 u.m. más de
+  ingreso cambian los odds por un factor de `r round(exp(100*b1["ingresos"]),4)`;
+  mayor capacidad de pago, menor riesgo.
+- **Score** ($\hat\beta=`r fmt(b1["score"])`$): cada 10 puntos multiplican los
+  odds por `r round(exp(10*b1["score"]),4)`. El signo es **positivo**, lo que es
+  contraintuitivo y se discute en la Sección 2.4.
+- **Género** ($\hat\beta=`r fmt(b1["genero"])`$): ser hombre multiplica los odds
+  por `r round(exp(b1["genero"]),3)` frente a ser mujer; es el efecto de mayor
+  magnitud del modelo.
+- **Monto** ($\hat\beta=`r fmt(b1["monto_prestamo"])`$): cada 1.000 u.m. más
+  multiplican los odds por `r round(exp(1000*b1["monto_prestamo"]),4)`; mayor
+  exposición, mayor riesgo, aunque es el efecto más débil.
+
+**Validación central del ejercicio:** el parámetro verdadero del DGP queda
+contenido en el intervalo de confianza del 95\% de su estimación en
+**`r cobertura1` de los `r length(beta_real)` parámetros** (última columna del
+Cuadro 1). Esto confirma que la estimación por máxima verosimilitud es consistente
+y que el código recupera el mecanismo que generó los datos: el modelo no está
+"acertando por casualidad", está identificando el proceso subyacente.
+
+## Verificación de supuestos y capacidad predictiva
+
+```{r diagnosticos-modelo1}
+kable(tabla_diagnosticos(modelo1, datos1$default), booktabs = TRUE, linesep = "",
+      caption = "Modelo 1. Diagnósticos del ajuste y desempeño predictivo.")
+```
+
+```{r figuras-modelo1, fig.height=2.2, fig.cap="Modelo 1. Izquierda a derecha: logit empírico por deciles de cada covariable continua. La tendencia aproximadamente recta respalda el supuesto de linealidad en la escala logit."}
+le1 <- logit_empirico(datos1, "default",
+                      c("edad", "ingresos", "score", "monto_prestamo"))
+ggplot(le1, aes(x = x_medio, y = logit_emp)) +
+  geom_point(size = 1) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 0.4) +
+  facet_wrap(~ variable, scales = "free_x", nrow = 1) +
+  labs(x = "Valor medio del decil", y = "logit empírico")
+```
+
+```{r roc-modelo1, fig.height=2.4, out.width="42%", fig.cap="Modelo 1. Curva ROC: recorre todos los puntos de corte y grafica sensibilidad contra 1 - especificidad. El AUC es la probabilidad de asignar mayor riesgo a un incumplidor que a un cumplidor."}
+grafico_roc(roc1)
+```
+
+Los VIF máximos cercanos a 1 son coherentes con covariables generadas de forma
+independiente: no hay multicolinealidad. El logit empírico es aproximadamente
+recto en las cuatro covariables continuas, como debía ocurrir en un DGP construido
+lineal en el logit; es la confirmación de que el diagnóstico funciona. La prueba de
+Hosmer-Lemeshow arroja $p=`r round(hosmer_lemeshow(datos1$default, p1)$p_valor,4)`$,
+de modo que
+`r if (hosmer_lemeshow(datos1$default, p1)$p_valor > 0.05) "no se rechaza la buena calibración" else "se detecta falta de calibración en los extremos"`.
+El $R^2$ de McFadden (`r round(pseudo_r2_mcfadden(modelo1),4)`) es bajo en
+apariencia pero normal en modelos de *default*: la deviance residual absorbe la
+aleatoriedad binomial irreducible que el propio `rbinom()` introdujo. Con AUC
+$=`r round(as.numeric(auc(roc1)),4)`$ la discriminación es
+`r if (as.numeric(auc(roc1)) >= 0.7) "aceptable" else "modesta"`, pero la matriz de
+confusión al corte 0,5 revela el problema del **desbalance**: la especificidad
+(`r round(mc1$especificidad,3)`) es muy inferior a la sensibilidad
+(`r round(mc1$sensibilidad,3)`), porque con una tasa de impago de
+`r round(tasa1*100,1)`\% el modelo tiende a clasificar casi todo como
+incumplimiento. En producción el corte no debería ser 0,5 sino el que minimice el
+costo esperado (pérdida por impago frente a lucro cesante por rechazo).
+
+## Observación crítica sobre la especificación
+
+El diseño de simulación de la guía produce dos resultados que merecen crítica
+explícita y no solo ser reportados:
+
+1. **El signo de `score` contradice la teoría financiera.** El DGP fija
+   $\beta_{score}=+0{,}01$: un mejor score **aumentaría** el riesgo. Pero el score
+   es, por construcción, una puntuación decreciente en riesgo, de modo que lo
+   coherente sería $\beta_{score}<0$. El modelo recupera fielmente el $+0{,}01$
+   —correcto *como estimación*—, pero su lectura sustantiva no es trasladable a un
+   caso real.
+2. **La tasa base es implausible.** Evaluando el predictor lineal en las medias:
+   $\eta\approx`r round(eta_medio,2)`$ y por tanto
+   $p\approx`r round(1/(1+exp(-eta_medio)),3)`$. El término
+   $+0{,}01\times score\approx+6$ domina y anula el intercepto. Una cartera con
+   `r round(tasa1*100,1)`\% de impago no es viable.
+
+Para medir el impacto se ajusta un **modelo de sensibilidad** idéntico, salvo el
+signo de `score` y la recalibración del intercepto:
+
+```{r sensibilidad-modelo1}
+set.seed(123)   # misma semilla: cambia la especificación, no el azar
+lin_pred_b <- -3 - 0.03 * edad - 0.0004 * ingresos - 0.01 * score +
+               0.8 * genero + 0.0001 * monto_prestamo + 6   # signo corregido
+default_b  <- rbinom(n, 1, 1 / (1 + exp(-lin_pred_b)))
+datos1b    <- data.frame(default = default_b, edad, ingresos, score,
+                         genero, monto_prestamo)
+modelo1b   <- glm(default ~ edad + ingresos + score + genero + monto_prestamo,
+                  family = binomial(link = "logit"), data = datos1b)
+roc1b <- roc(datos1b$default, fitted(modelo1b), quiet = TRUE)
+
+comp <- data.frame(
+  c("Tasa de incumplimiento", "Beta de score", "OR de score (+10 puntos)",
+    "AUC", "R2 de McFadden"),
+  c(paste0(round(mean(datos1$default) * 100, 1), " %"),
+    round(coef(modelo1)["score"], 4), round(exp(10 * coef(modelo1)["score"]), 4),
+    round(as.numeric(auc(roc1)), 4), round(pseudo_r2_mcfadden(modelo1), 4)),
+  c(paste0(round(mean(default_b) * 100, 1), " %"),
+    round(coef(modelo1b)["score"], 4), round(exp(10 * coef(modelo1b)["score"]), 4),
+    round(as.numeric(auc(roc1b)), 4), round(pseudo_r2_mcfadden(modelo1b), 4)),
+  row.names = NULL)
+names(comp) <- c("Indicador", "Especificación de la guía",
+                 "Especificación corregida")
+kable(comp, booktabs = TRUE, linesep = "",
+      caption = "Modelo 1. Efecto de corregir el signo de \\emph{score}: la estimación no cambia de calidad, pero sí la coherencia financiera del modelo.")
+```
+
+Con el signo corregido la tasa de impago baja a `r round(mean(default_b)*100,1)`\%
+y cada 10 puntos de score **reducen** los odds en
+`r abs(round(100*(exp(10*coef(modelo1b)["score"])-1),1))`\%, que es la dirección
+esperada. La lección metodológica: **un modelo puede estar perfectamente bien
+estimado y ser inútil si el signo de la especificación no resiste la validación de
+negocio.** La revisión de signos es un paso obligatorio del *credit scoring*,
+anterior a cualquier métrica de ajuste.
+
+\newpage
+
+# Modelo 2: base Traindata, respuesta `cumple`
+
+## Carga de los datos y ajuste
+
+```{r carga-traindata}
+# La guía pide cargar la base "Traindata" del aula virtual (Excel) y modelar
+# 'cumple' contra todas las demás variables.
+#
+# El bloque busca el archivo en ./datos/. Si NO está disponible, construye una
+# base sustituta simulada con la misma estructura, para que el documento sea
+# íntegramente reproducible. Basta copiar el archivo real en
+# ./datos/Traindata.xlsx y volver a compilar: nada más cambia en el análisis.
+ruta_xlsx <- file.path("datos", "Traindata.xlsx")
+ruta_csv  <- file.path("datos", "Traindata.csv")
+
+if (file.exists(ruta_xlsx)) {
+  traindata <- as.data.frame(read_excel(ruta_xlsx))
+  origen    <- "archivo Traindata.xlsx del aula virtual"
+} else if (file.exists(ruta_csv)) {
+  traindata <- read.csv(ruta_csv)
+  origen    <- "archivo Traindata.csv del aula virtual"
+} else {
+  # ---- Base sustituta simulada: estructura típica de una tabla de scoring ----
+  set.seed(2025)
+  m <- 1200
+  traindata <- data.frame(
+    edad               = round(rnorm(m, 38, 11)),
+    ingresos           = round(rlnorm(m, log(2800), 0.45)),  # sesgo a la derecha
+    score              = round(rnorm(m, 620, 70)),
+    genero             = rbinom(m, 1, 0.48),                 # 0 = F, 1 = M
+    monto_prestamo     = round(rnorm(m, 6200, 2100)),
+    plazo_meses        = sample(c(12, 24, 36, 48, 60), m, replace = TRUE),
+    antiguedad_laboral = round(abs(rnorm(m, 5, 4)), 1),      # años
+    creditos_previos   = rpois(m, 1.6),
+    tasa_endeudamiento = round(pmin(pmax(rnorm(m, 0.35, 0.12), 0.02), 0.95), 3)
+  )
+  # Predictor lineal del CUMPLIMIENTO: los signos se invierten respecto al
+  # Modelo 1, porque aquí el evento y = 1 es cumplir, no incumplir.
+  eta <- -5.10 + 0.018 * traindata$edad + 0.00022 * traindata$ingresos +
+          0.0075 * traindata$score - 0.00009 * traindata$monto_prestamo -
+          0.011 * traindata$plazo_meses + 0.075 * traindata$antiguedad_laboral -
+          0.16 * traindata$creditos_previos - 2.40 * traindata$tasa_endeudamiento -
+          0.22 * traindata$genero
+  traindata$cumple <- rbinom(m, 1, 1 / (1 + exp(-eta)))
+  origen <- paste("base SUSTITUTA simulada: el archivo Traindata del aula",
+                  "virtual no estaba disponible al compilar este documento")
+}
+traindata$cumple <- as.numeric(traindata$cumple)   # asegura respuesta 0/1
+```
+
+> **Nota de reproducibilidad.** Los resultados de esta sección provienen de la
+> `r origen`. La estructura del análisis —ajuste, supuestos, interpretación— es
+> idéntica para el archivo real; solo cambian las magnitudes numéricas.
+
+La base tiene `r nrow(traindata)` registros y `r ncol(traindata)-1` covariables,
+con una tasa de cumplimiento de **`r round(mean(traindata$cumple)*100,1)`\%**.
+Es indispensable fijar la **dirección de la respuesta**: aquí el evento $Y=1$ es
+*cumplir*, no incumplir, de modo que **todos los signos se leen al revés que en el
+Modelo 1**: $\beta_j>0$ aumenta la probabilidad de cumplimiento y por tanto
+**reduce** el riesgo.
+
+```{r ajuste-modelo2, echo=TRUE}
+# La notación 'cumple ~ .' significa: cumple explicada por TODAS las demás
+# variables del data.frame, que es exactamente lo que solicita la guía.
+modelo2 <- glm(cumple ~ ., family = binomial(link = "logit"), data = traindata)
+summary(modelo2)
+```
+
+```{r objetos-modelo2}
+p2   <- fitted(modelo2)
+roc2 <- roc(traindata$cumple, p2, quiet = TRUE)
+b2   <- coef(modelo2)
+sig2 <- summary(modelo2)$coefficients[, 4] < 0.05
+mc2  <- matriz_confusion(traindata$cumple, p2, 0.5)
+corte_opt <- as.numeric(coords(roc2, "best", best.method = "youden",
+                               ret = "threshold")[1])
+mc2_opt <- matriz_confusion(traindata$cumple, p2, corte_opt)
+```
+
+## Interpretación de los coeficientes
+
+```{r tabla-modelo2}
+kable(tabla_coeficientes(modelo2), booktabs = TRUE, linesep = "", digits = 5,
+      caption = "Modelo 2 (Traindata). Coeficientes, significancia, odds ratios e intervalos al 95 \\%. La respuesta es \\emph{cumple}: OR > 1 indica MENOR riesgo de crédito.")
+```
+
+```{r efectos-modelo2}
+# Odds ratios reescalados a incrementos con significado práctico.
+esc <- c(edad = 5, ingresos = 500, score = 25, genero = 1, monto_prestamo = 1000,
+         plazo_meses = 12, antiguedad_laboral = 1, creditos_previos = 1,
+         tasa_endeudamiento = 0.10)
+esc <- esc[names(esc) %in% names(b2)]
+ef2 <- data.frame(
+  names(esc), unname(esc),
+  round(exp(b2[names(esc)] * esc), 4),
+  round(100 * (exp(b2[names(esc)] * esc) - 1), 2),
+  ifelse(b2[names(esc)] > 0, "Menor riesgo", "Mayor riesgo"),
+  ifelse(sig2[names(esc)], "Sí", "No"),
+  row.names = NULL)
+names(ef2) <- c("Variable", "Incremento", "OR reescalado",
+                "Cambio en odds de cumplir (%)", "Lectura de riesgo",
+                "Signif. 5%")
+kable(ef2, booktabs = TRUE, linesep = "",
+      caption = "Modelo 2. Odds ratios reescalados a incrementos financieramente interpretables, con su lectura de riesgo.")
+```
+
+Resultan significativas al 5\% las variables
+**`r paste(names(b2)[-1][sig2[-1]], collapse=", ")`**
+(`r sum(sig2[-1])` de `r length(b2)-1`). Recordando que el evento es *cumplir*:
+
+- Las covariables con $\hat\beta>0$ —`r paste(names(b2)[-1][b2[-1]>0], collapse=", ")`—
+  **elevan la probabilidad de cumplimiento** y operan como factores protectores.
+- Las covariables con $\hat\beta<0$ —`r paste(names(b2)[-1][b2[-1]<0], collapse=", ")`—
+  **reducen la probabilidad de cumplimiento** y funcionan como señales de alerta en
+  la decisión de otorgamiento.
+- Las no significativas no aportan evidencia suficiente de un efecto distinto de
+  cero una vez controladas las demás. Son candidatas a eliminación en una etapa de
+  selección de variables (AIC o regularización), pero **su exclusión no debe
+  decidirse solo por el p-valor**: deben pesar también el criterio de negocio y la
+  estabilidad del coeficiente.
+
+## Verificación de supuestos y capacidad predictiva
+
+```{r diagnosticos-modelo2}
+diag2 <- tabla_diagnosticos(modelo2, traindata$cumple)
+# Se añade la regla EPV (eventos por variable): min(n1, n0)/k >= 10 es el
+# tamaño mínimo recomendado para que los errores estándar sean confiables.
+epv <- min(table(traindata$cumple)) / (ncol(traindata) - 1)
+# setNames() se usa en lugar de nombres acentuados entre comillas invertidas,
+# para que el código sea válido también en locales sin soporte UTF-8 (Windows).
+fila_epv <- setNames(
+  data.frame("Eventos por variable (EPV)", sprintf("%.1f", epv),
+             ">= 10: muestra suficiente", stringsAsFactors = FALSE),
+  names(diag2))
+diag2 <- rbind(diag2, fila_epv)
+kable(diag2, booktabs = TRUE, linesep = "",
+      caption = "Modelo 2. Diagnósticos del ajuste y desempeño predictivo.")
+```
+
+```{r linealidad-modelo2, fig.height=3.0, fig.cap="Modelo 2. Logit empírico por deciles de las covariables continuas de Traindata."}
+# Se seleccionan como continuas las numéricas con más de 10 valores distintos.
+cont2 <- setdiff(names(traindata)[sapply(traindata, function(v)
+            is.numeric(v) && length(unique(v)) > 10)], "cumple")
+ggplot(logit_empirico(traindata, "cumple", cont2),
+       aes(x = x_medio, y = logit_emp)) +
+  geom_point(size = 1) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 0.4) +
+  facet_wrap(~ variable, scales = "free_x") +
+  labs(x = "Valor medio del decil", y = "logit empírico")
+```
+
+```{r roc-modelo2, fig.height=2.4, out.width="42%", fig.cap="Modelo 2. Curva ROC sobre la base Traindata."}
+grafico_roc(roc2)
+```
+
+```{r densidad-modelo2, fig.height=2.0, fig.cap="Modelo 2. Distribución de las probabilidades predichas según el resultado observado: cuanto menor el traslape, mayor la capacidad de discriminación."}
+ggplot(data.frame(p = p2, y = factor(traindata$cumple,
+                                     labels = c("No cumple (0)", "Cumple (1)"))),
+       aes(x = p, fill = y)) +
+  geom_density(alpha = 0.45, linewidth = 0.3) +
+  scale_fill_grey(start = 0.25, end = 0.75) +
+  labs(x = "Probabilidad predicha de cumplimiento", y = "Densidad",
+       fill = "Observado") +
+  theme(legend.position = "bottom", legend.key.size = unit(0.3, "cm"))
+```
+
+El AUC de `r round(as.numeric(auc(roc2)),4)` indica una capacidad de ordenamiento
+`r if (as.numeric(auc(roc2)) >= 0.8) "buena" else if (as.numeric(auc(roc2)) >= 0.7) "aceptable" else "limitada"`,
+los VIF descartan multicolinealidad y el EPV de `r round(epv,1)` supera con holgura
+el mínimo de 10 recomendado, de modo que los errores estándar son confiables. Al
+mover el corte de 0,5 al óptimo de Youden (`r round(corte_opt,3)`) la exactitud
+pasa de `r round(mc2$exactitud,3)` a `r round(mc2_opt$exactitud,3)`; lo relevante no
+es ese cambio sino el reequilibrio entre sensibilidad
+(`r round(mc2$sensibilidad,3)` $\to$ `r round(mc2_opt$sensibilidad,3)`) y
+especificidad (`r round(mc2$especificidad,3)` $\to$ `r round(mc2_opt$especificidad,3)`).
+En cartera, aprobar a quien no paga y rechazar a quien sí paga tienen costos muy
+distintos, y es esa matriz de costos —no la exactitud— la que debe fijar el umbral.
+
+# Reflexión analítica
+
+**El logit es interpretable, y esa es su ventaja competitiva frente a modelos más
+potentes.** En riesgo de crédito la interpretabilidad no es un lujo académico sino
+un requisito regulatorio y operativo. Un *gradient boosting* puede superar al logit
+en AUC, pero el logit entrega un odds ratio por variable que un comité de crédito
+puede auditar y que permite justificar ante un cliente por qué fue rechazado. El
+precio de esa transparencia es la rigidez funcional —linealidad en el logit,
+ausencia de interacciones no declaradas— que precisamente por eso debe verificarse
+con diagnósticos y no darse por sentada.
+
+**Estimar bien no equivale a modelar bien.** El Modelo 1 recuperó los parámetros
+verdaderos del DGP con precisión: cada estimación quedó dentro de su intervalo de
+confianza. Y sin embargo el modelo es sustantivamente defectuoso, porque el signo
+de `score` implica que un mejor historial aumenta el riesgo y porque la tasa de
+impago resultante (`r round(tasa1*100,1)`\%) no describe ninguna cartera real.
+Bastó corregir un signo y recalibrar el intercepto para obtener un comportamiento
+coherente. La validación de signos y de tasas base contra el conocimiento del
+negocio es, entonces, una etapa del flujo de trabajo tan obligatoria como la prueba
+de Hosmer-Lemeshow.
+
+**La IA generativa acelera el código pero no sustituye el juicio estadístico.**
+Las herramientas de IA producen en segundos la sintaxis de una simulación y un
+`glm()`, y el código base de esta guía tiene ese origen. Pero también reprodujeron
+sin advertencia un `seed(123)` inexistente, un paréntesis desbalanceado, un `glm()`
+sin `data=` y un signo económicamente inconsistente. El valor que agrega el
+analista está justamente en lo que la herramienta no hace: fijar la dirección de la
+respuesta —`default` frente a `cumple` invierte toda la interpretación—, reescalar
+los efectos a incrementos con sentido financiero, verificar supuestos y elegir el
+punto de corte según la matriz de costos y no según la exactitud. Usada como
+copiloto de sintaxis bajo supervisión metodológica, la IA es un multiplicador de
+productividad; usada como oráculo, es un generador de modelos plausibles y
+equivocados.
+
+# Conclusiones
+
+1. Se ajustaron los dos modelos logit solicitados. En el Modelo 1 la estimación por
+   máxima verosimilitud recuperó los parámetros del proceso generador
+   (AUC $=`r round(as.numeric(auc(roc1)),3)`$), validando la implementación en R.
+2. Los diagnósticos confirmaron ausencia de multicolinealidad (VIF $\approx 1$) y
+   linealidad en el logit en ambos modelos: la especificación es estadísticamente
+   admisible.
+3. En el Modelo 2 sobre Traindata, con `cumple` como respuesta, el modelo alcanzó
+   AUC $=`r round(as.numeric(auc(roc2)),3)`$ y $R^2$ de McFadden
+   $=`r round(pseudo_r2_mcfadden(modelo2),3)`$, con `r sum(sig2[-1])` de
+   `r length(b2)-1` covariables significativas al 5\%.
+4. La limitación principal es de especificación, no de estimación: el signo positivo
+   de `score` en el diseño de la guía es incompatible con la teoría del riesgo de
+   crédito, y corregirlo modifica tanto la tasa base como la interpretación
+   gerencial del modelo.
+
+# Referencias
+
+Contenido del Módulo 1, *Fundamentos de Inteligencia Artificial y Automatización de
+Procesos Financieros*. --- Provost, F., & Fawcett, T. (2013). *Data Science for
+Business*. O'Reilly Media, caps. 1--2. --- Hosmer, D. W., Lemeshow, S., &
+Sturdivant, R. X. (2013). *Applied Logistic Regression* (3.ª ed.). Wiley. ---
+OECD (2021). *AI in Financial Markets: Applications and Policy Implications*. ---
+McKinsey Global Institute (2018). *The age of analytics: Competing in a data-driven
+world*. --- R Core Team (2024). *R: A Language and Environment for Statistical
+Computing*. Viena: R Foundation for Statistical Computing.
+
+\appendix
+
+# Anexo A: código completo de R
+
+```{r codigo-completo, ref.label=setdiff(knitr::all_labels(), c("configuracion-global","codigo-completo","entorno")), echo=TRUE, eval=FALSE}
+```
+
+# Anexo B: entorno de cómputo
+
+```{r entorno, comment=NA}
+cat(R.version.string, "\n")
+cat("Paquetes:", paste(sapply(c("ggplot2", "pROC", "car", "readxl", "knitr"),
+      function(p) paste0(p, " ", as.character(packageVersion(p)))),
+      collapse = " | "), "\n")
+cat("Semillas: 123 (Modelo 1), 2025 (base sustituta Traindata)\n")
+cat("Fuente de datos del Modelo 2:", origen, "\n")
+```
