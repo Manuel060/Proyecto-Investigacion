@@ -294,6 +294,13 @@ ggplot(datos1, aes(x = factor(default, labels = c("Pagó", "No pagó")),
 posibles <- c("datos/Traindata.xlsx", "Traindata.xlsx")
 ruta <- posibles[file.exists(posibles)][1]
 
+# Si el navegador guardó el archivo con otro nombre (por ejemplo
+# "Traindata_.xlsx" o "Traindata (1).xlsx"), lo buscamos por su comienzo.
+if (is.na(ruta)) {
+  encontrados <- list.files(pattern = "^Traindata.*\\.xlsx$", ignore.case = TRUE)
+  if (length(encontrados) > 0) ruta <- encontrados[1]
+}
+
 # Si no aparece en ninguno de los dos, avisamos con un mensaje claro en vez de
 # dejar que R lance un error difícil de entender.
 if (is.na(ruta)) {
