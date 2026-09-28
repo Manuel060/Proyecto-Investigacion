@@ -1,0 +1,550 @@
+---
+format:
+  pdf:
+    documentclass: article
+    papersize: letter
+    geometry: margin=2.3cm
+    number-sections: true
+    fig-pos: "H"
+    fig-align: center
+    tbl-cap-location: top
+    include-in-header:
+      text: |
+        \usepackage{booktabs}
+        \usepackage{float}
+        \usepackage{fancyhdr}
+        \pagestyle{fancy}
+        \fancyhf{}
+        \fancyhead[L]{\small Modelo Logit --- Guía 2}
+        \fancyhead[R]{\small\thepage}
+        \renewcommand{\headrulewidth}{0.4pt}
+lang: es
+fontsize: 10pt
+execute:
+  echo: true
+  warning: false
+  message: false
+knitr:
+  opts_chunk:
+    comment: "#>"
+    fig.width: 6.3
+    fig.height: 2.6
+    out.width: "85%"
+---
+
+```{r}
+#| label: preparacion
+#| include: false
+
+# Opciones para que los números salgan en formato normal y no en notación
+# científica (por ejemplo 8605213 en vez de 8.6e+06).
+options(scipen = 999, digits = 4)
+```
+
+\begin{titlepage}
+\centering
+\vspace*{1.5cm}
+
+{\Large\scshape Universidad El Bosque\par}
+\vspace{0.25cm}
+{\large Departamento de Matemáticas\par}
+\vspace{0.15cm}
+{\large Programa: Matemáticas y Ciencia de Datos\par}
+
+\vspace{2cm}
+\rule{\textwidth}{0.6pt}
+\vspace{0.5cm}
+
+{\LARGE\bfseries Análisis de riesgo de incumplimiento\\[0.25cm] con un modelo de regresión Logit\par}
+\vspace{0.5cm}
+{\large Módulo 1, Unidad 1 --- Guía de Aprendizaje 2\\ Actividades 3 y 4\par}
+
+\vspace{0.4cm}
+\rule{\textwidth}{0.6pt}
+
+\vspace{1.8cm}
+{\large\bfseries Presentado por\par}
+\vspace{0.15cm}
+{\large Sergio Preciado\par}
+
+\vspace{1.4cm}
+{\large\bfseries Curso\par}
+\vspace{0.15cm}
+{\large Inteligencia Artificial para Asuntos Financieros\par}
+
+\vspace{1.4cm}
+{\large\bfseries Docente\par}
+\vspace{0.15cm}
+{\large William Arley Rincón Gómez\par}
+
+\vfill
+{\large Bogotá D.C., 2025\par}
+\end{titlepage}
+
+\newpage
+
+# ¿Qué vamos a hacer y por qué?
+
+Queremos responder una pregunta de un banco: **¿este cliente va a pagar su
+crédito o no?** La respuesta solo tiene dos opciones (sí o no), y para ese tipo
+de preguntas se usa el **modelo logit**.
+
+La idea es sencilla. El modelo toma los datos del cliente (edad, ingresos,
+score, etc.) y devuelve **una probabilidad entre 0 y 1**. Por ejemplo, 0,85
+significa "hay 85 % de posibilidades de que este cliente pague".
+
+Para leer los resultados vamos a usar el **OR** (*odds ratio*), que es
+simplemente **un multiplicador de las posibilidades**:
+
+| Si el OR vale... | Significa que la variable... |
+|:---|:---|
+| más de 1 (ej. 2,0) | **aumenta** las posibilidades (aquí, las duplica) |
+| menos de 1 (ej. 0,5) | **reduce** las posibilidades (aquí, a la mitad) |
+| exactamente 1 | no cambia nada |
+
+Este trabajo tiene dos partes, tal como las pide la guía:
+
+1. **Parte 1:** inventar (simular) 1.000 clientes y aplicarles el modelo.
+2. **Parte 2:** usar la base real `Traindata` del curso.
+
+# Parte 1: simulación de 1.000 clientes
+
+## Paso 1: cargar las librerías
+
+```{r}
+#| label: paso1-librerias
+
+# ggplot2 sirve para hacer gráficos bonitos.
+# readxl sirve para abrir archivos de Excel (lo usaremos en la Parte 2).
+library(ggplot2)
+library(readxl)
+```
+
+## Paso 2: inventar los datos de 1.000 clientes
+
+```{r}
+#| label: paso2-simular
+
+# set.seed() hace que los "números al azar" sean siempre los mismos.
+# Así, si otra persona corre este código, obtiene exactamente mis resultados.
+set.seed(123)
+
+n <- 1000   # vamos a inventar 1.000 clientes
+
+# rnorm(cuántos, promedio, variación) inventa números alrededor de un promedio.
+# rbinom() inventa ceros y unos.
+# Las variables se crean en el mismo orden en que las lista la guía.
+edad           <- rnorm(n, 40, 10)     # edades alrededor de 40 años
+ingresos       <- rnorm(n, 3000, 1000) # ingresos alrededor de 3.000
+score          <- rnorm(n, 600, 50)    # score alrededor de 600 puntos
+genero         <- rbinom(n, 1, 0.5)    # 0 = mujer, 1 = hombre, mitad y mitad
+monto_prestamo <- rnorm(n, 5000, 1500) # préstamos alrededor de 5.000
+```
+
+## Paso 3: calcular la probabilidad de que cada cliente incumpla
+
+```{r}
+#| label: paso3-probabilidad
+
+# Esta cuenta larga es la fórmula que da la guía. Cada número dice cuánto
+# influye cada variable. Todavía no es una probabilidad, es un puntaje interno.
+lin_pred <- -3 - 0.03 * edad - 0.0004 * ingresos + 0.01 * score +
+             0.8 * genero + 0.0001 * monto_prestamo
+
+# Esta línea convierte ese puntaje en una probabilidad entre 0 y 1.
+prob <- 1 / (1 + exp(-lin_pred))
+
+# Miramos cómo quedaron las probabilidades:
+summary(prob)
+```
+
+## Paso 4: decidir quién incumple y quién no
+
+```{r}
+#| label: paso4-default
+
+# rbinom() lanza una "moneda cargada" con la probabilidad de cada cliente.
+# El resultado es la variable que queremos explicar: 0 = paga, 1 = no paga.
+default <- rbinom(n, 1, prob)
+
+# Juntamos todo en una tabla (data.frame) para trabajar ordenados.
+datos1 <- data.frame(default, edad, ingresos, score, genero, monto_prestamo)
+
+# ¿Cuántos incumplieron?
+table(default)
+```
+
+```{r}
+#| label: paso4-tasa
+#| echo: false
+
+tasa1 <- mean(datos1$default)
+```
+
+De los 1.000 clientes inventados, **`r sum(datos1$default)` no pagaron**, o sea
+el **`r round(tasa1*100, 1)` %**. Este número nos va a servir más adelante.
+
+## Paso 5: ajustar el modelo logit
+
+```{r}
+#| label: paso5-modelo
+
+# glm() es la función que ajusta el modelo. Se lee así:
+#   default ~ edad + ingresos + ...  ->  "explica default usando estas variables"
+#   family = binomial(link = "logit") ->  "usa el modelo logit"
+#   data = datos1                     ->  "los datos están en esta tabla"
+modelo1 <- glm(default ~ edad + ingresos + score + genero + monto_prestamo,
+               family = binomial(link = "logit"),
+               data = datos1)
+```
+
+## Paso 6: ver la salida del modelo
+
+```{r}
+#| label: paso6-salida
+
+summary(modelo1)
+```
+
+## Paso 7: interpretar los resultados
+
+Para leer esto más fácil, convertimos los coeficientes en OR (multiplicadores):
+
+```{r}
+#| label: paso7-or
+
+# exp() convierte el coeficiente en el multiplicador (OR).
+round(exp(coef(modelo1)), 4)
+```
+
+```{r}
+#| label: paso7-tabla
+#| echo: false
+
+b1 <- coef(modelo1)
+p1 <- summary(modelo1)$coefficients[, 4]
+
+tab <- data.frame(
+  c("Edad (1 año más)", "Ingresos (100 más)", "Score (10 puntos más)",
+    "Ser hombre", "Préstamo (1.000 más)"),
+  c(round(exp(b1["edad"]), 3), round(exp(100 * b1["ingresos"]), 3),
+    round(exp(10 * b1["score"]), 3), round(exp(b1["genero"]), 3),
+    round(exp(1000 * b1["monto_prestamo"]), 3)),
+  # El efecto se deduce del signo del coeficiente: positivo sube el riesgo.
+  ifelse(b1[c("edad", "ingresos", "score", "genero", "monto_prestamo")] > 0,
+         "Sube el riesgo", "Baja el riesgo"),
+  ifelse(p1[c("edad", "ingresos", "score", "genero", "monto_prestamo")] < 0.05,
+         "Sí", "No"),
+  row.names = NULL)
+names(tab) <- c("Si aumenta...", "OR", "Efecto sobre el riesgo de no pagar",
+                "¿Es confiable?")
+knitr::kable(tab, booktabs = TRUE, linesep = "",
+             caption = "Parte 1. Resultados del modelo, traducidos a lenguaje sencillo.")
+```
+
+**En palabras simples:**
+
+- **Edad:** los clientes mayores incumplen menos. Cada año que pasa baja un poco
+  el riesgo (OR = `r round(exp(b1["edad"]),3)`, o sea un
+  `r abs(round(100*(exp(b1["edad"])-1),1))` % menos).
+- **Ingresos:** quien gana más, paga mejor. Es lo esperado.
+- **Ser hombre:** en estos datos los hombres incumplen más. El OR de
+  `r round(exp(b1["genero"]),2)` quiere decir que sus posibilidades de no pagar
+  son unas `r round(exp(b1["genero"]),1)` veces las de las mujeres.
+- **Score:** aquí aparece algo raro, y hay que decirlo: el modelo dice que **un
+  mejor score sube el riesgo**. Eso no tiene sentido en la vida real, porque un
+  score alto es justamente señal de buen pagador. La explicación es que la
+  fórmula del Paso 3 (la que da la guía) trae ese signo así, y el modelo
+  simplemente repite lo que está en los datos inventados.
+- **Monto del préstamo:** sube el riesgo, pero muy poquito, y la columna
+  "¿Es confiable?" dice **No**: con estos datos no podemos asegurar que
+  realmente influya.
+
+**Una nota importante:** el `r round(tasa1*100,1)` % de incumplimiento de estos
+datos inventados es altísimo. Ningún banco real tiene tantos clientes que no
+pagan. Pasa por lo mismo del score: la fórmula de la guía infla el riesgo. El
+modelo está bien hecho; **los datos inventados son los que no son realistas.**
+
+## Paso 8: un gráfico para ver el resultado
+
+```{r}
+#| label: paso8-grafico
+#| fig-cap: "Parte 1. Probabilidad de no pagar que el modelo le asigna a cada cliente, separada según lo que realmente pasó. Se ve que los que no pagaron (barra de la derecha) tienden a tener probabilidades más altas, que es lo que uno espera de un modelo que funciona."
+
+# Guardamos la probabilidad que el modelo calculó para cada cliente.
+datos1$prob_estimada <- fitted(modelo1)
+
+ggplot(datos1, aes(x = factor(default, labels = c("Pagó", "No pagó")),
+                   y = prob_estimada)) +
+  geom_boxplot(fill = "grey80") +
+  labs(x = "Lo que realmente pasó", y = "Probabilidad estimada de no pagar") +
+  theme_minimal(base_size = 9)
+```
+
+# Parte 2: la base real Traindata
+
+## Paso 1: abrir el archivo de Excel
+
+```{r}
+#| label: p2-paso1-cargar
+
+# read_excel() abre el archivo. Lo guardamos en la carpeta "datos".
+traindata <- as.data.frame(read_excel("datos/Traindata.xlsx"))
+
+# La columna "Score Crediticio" tiene un espacio en el nombre y eso incomoda
+# a R. Le cambiamos el espacio por un guion bajo.
+names(traindata)[names(traindata) == "Score Crediticio"] <- "Score_Crediticio"
+
+# ¿Cuántas filas y columnas tiene?
+dim(traindata)
+```
+
+## Paso 2: mirar los datos antes de modelar
+
+```{r}
+#| label: p2-paso2-mirar
+
+# Las primeras filas, para saber qué pinta tienen los datos.
+head(traindata, 4)
+
+# ¿Cuántos clientes cumplen (1) y cuántos no (0)?
+table(traindata$Cumple)
+```
+
+```{r}
+#| label: p2-paso2-calculos
+#| echo: false
+
+tasa_cumple <- mean(traindata$Cumple)
+```
+
+La base tiene **`r nrow(traindata)` clientes** y **`r ncol(traindata)` columnas**.
+De ellos, `r sum(traindata$Cumple)` cumplen y
+`r sum(traindata$Cumple == 0)` no cumplen, o sea que el
+**`r round(tasa_cumple*100, 1)` %** cumple.
+
+> **Ojo con un detalle que cambia todo:** aquí la variable a explicar se llama
+> `Cumple`, y el 1 significa **que sí paga**. En la Parte 1 el 1 significaba lo
+> contrario (que no paga). Entonces en esta parte **todo se lee al revés**: un OR
+> mayor que 1 ahora es una **buena** noticia.
+
+## Paso 3: el modelo tal como lo pide la guía
+
+La guía dice: usar `Cumple` como variable dependiente y **todas las demás** como
+independientes. Eso se escribe `Cumple ~ .` (el punto significa "todas las
+demás"). Lo hacemos:
+
+```{r}
+#| label: p2-paso3-modelo-completo
+#| warning: true
+
+modelo_completo <- glm(Cumple ~ ., family = binomial(link = "logit"),
+                       data = traindata)
+
+summary(modelo_completo)
+```
+
+## Paso 4: algo salió mal (y hay que entender qué)
+
+Fíjese en tres cosas de esa salida:
+
+1. R nos dio una **advertencia**: *"algorithm did not converge"*, es decir
+   **el modelo no pudo terminar el cálculo**.
+2. Los números de la columna `Std. Error` son **gigantescos** (miles, decenas de
+   miles). Eso quiere decir que el modelo no tiene ni idea de cuánto vale cada
+   coeficiente.
+3. **Ninguna variable salió significativa** (todos los `Pr(>|z|)` cerca de 1),
+   pero al mismo tiempo la `Residual deviance` es casi 0, lo que en teoría
+   significaría un modelo perfecto. Eso es contradictorio.
+
+Cuando un modelo logit se comporta así, casi siempre hay una razón: **una de las
+variables ya contiene la respuesta**. Vamos a buscarla mirando los ingresos:
+
+```{r}
+#| label: p2-paso4-buscar
+
+# Rango de ingresos de los que NO cumplen y de los que SÍ cumplen.
+tapply(traindata$Ingresos, traindata$Cumple, range)
+```
+
+```{r}
+#| label: p2-paso4-grafico
+#| fig-height: 2.3
+#| fig-cap: "Parte 2. Ingresos de cada grupo. Las dos nubes de puntos no se tocan: hay una línea (10 millones) que separa perfectamente a quien cumple de quien no cumple. Esto es lo que rompió el modelo."
+
+ggplot(traindata, aes(x = factor(Cumple, labels = c("No cumple", "Cumple")),
+                      y = Ingresos)) +
+  geom_jitter(width = 0.25, alpha = 0.25, size = 0.6) +
+  geom_hline(yintercept = 1e7, linetype = "dashed") +
+  scale_y_continuous(labels = function(x) paste0(x / 1e6, " M")) +
+  labs(x = NULL, y = "Ingresos (millones)") +
+  theme_minimal(base_size = 9)
+```
+
+**Ahí está el problema.** Todos los que **no cumplen** ganan menos de 10
+millones, y todos los que **sí cumplen** ganan más de 10 millones. Ni una sola
+excepción entre `r nrow(traindata)` clientes.
+
+Eso significa que para saber si alguien cumple **no hace falta ningún modelo**:
+basta con preguntar si gana más de 10 millones. Y por eso el modelo se rompe: no
+tiene nada que estimar, la respuesta ya venía escrita en la columna `Ingresos`.
+En la vida real esto nunca pasa; lo más probable es que la columna `Cumple` de
+este archivo se haya **construido** a partir de los ingresos con ese corte.
+
+## Paso 5: el modelo corregido
+
+La solución es sacar `Ingresos` y quedarnos con las otras cinco variables. Así
+el modelo sí tiene trabajo que hacer y podemos interpretar los resultados, que
+es lo que pide la actividad.
+
+```{r}
+#| label: p2-paso5-modelo-bueno
+
+modelo2 <- glm(Cumple ~ Genero + Moras + Estado_Civil + Edad + Score_Crediticio,
+               family = binomial(link = "logit"),
+               data = traindata)
+
+summary(modelo2)
+```
+
+```{r}
+#| label: p2-paso5-or
+
+# Los coeficientes convertidos en multiplicadores (OR).
+round(exp(coef(modelo2)), 4)
+```
+
+## Paso 6: interpretar el modelo corregido
+
+```{r}
+#| label: p2-paso6-tabla
+#| echo: false
+
+b2 <- coef(modelo2)
+p2v <- summary(modelo2)$coefficients[, 4]
+vars <- c("Moras", "Score_Crediticio", "Edad", "Genero", "Estado_Civil")
+mult <- c(Moras = 1, Score_Crediticio = 100, Edad = 10, Genero = 1,
+          Estado_Civil = 1)
+
+tab2 <- data.frame(
+  c("Tener Moras = 1", "Score: 100 puntos más", "Edad: 10 años más",
+    "Ser hombre (Genero = 1)", "Estado civil = 1"),
+  round(exp(b2[vars] * mult[vars]), 3),
+  ifelse(b2[vars] > 0, "Cumple MÁS", "Cumple MENOS"),
+  ifelse(p2v[vars] < 0.05, "Sí", "No"),
+  row.names = NULL)
+names(tab2) <- c("Si...", "OR", "Efecto", "¿Es confiable?")
+knitr::kable(tab2, booktabs = TRUE, linesep = "",
+             caption = "Parte 2. Resultados del modelo corregido, traducidos a lenguaje sencillo.")
+```
+
+**En palabras simples** (recuerde: aquí OR mayor que 1 es bueno, significa que
+cumple más):
+
+- **Moras** es la variable más fuerte de todas. Con un OR de
+  `r round(exp(b2["Moras"]),2)`, los clientes con `Moras = 1` tienen unas
+  `r round(exp(b2["Moras"]),1)` veces más posibilidades de cumplir.
+  **Pero cuidado:** si "Moras" significa *tener deudas atrasadas*, este resultado
+  estaría al revés de lo lógico. Lo más probable es que en este archivo el 1
+  signifique *estar al día*. **Hay que confirmarlo con el profesor antes de
+  usar este modelo para decidir algo**, porque de eso depende cómo se lee.
+- **Score crediticio:** cada 100 puntos más multiplican por
+  `r round(exp(100*b2["Score_Crediticio"]),2)` las posibilidades de cumplir.
+  Tiene todo el sentido: mejor score, mejor pagador.
+- **Edad:** cada 10 años más multiplican por
+  `r round(exp(10*b2["Edad"]),2)` las posibilidades de cumplir. Los clientes
+  mayores pagan un poco mejor.
+- **Ser hombre:** OR de `r round(exp(b2["Genero"]),2)`, o sea que los hombres
+  cumplen un poco menos que las mujeres.
+- **Estado civil:** la columna "¿Es confiable?" dice **No**
+  (su valor es `r round(p2v["Estado_Civil"],3)`, y para ser confiable debería ser
+  menor que 0,05). Con estos datos no podemos afirmar que influya.
+
+## Paso 7: ¿qué tan bien funciona el modelo corregido?
+
+```{r}
+#| label: p2-paso7-aciertos
+
+# Regla simple: si la probabilidad es 0,5 o más, decimos que el cliente cumple.
+prob2  <- fitted(modelo2)
+prediccion <- ifelse(prob2 >= 0.5, 1, 0)
+
+# Tabla de aciertos y errores.
+table(Observado = traindata$Cumple, Predicho = prediccion)
+
+# Porcentaje de aciertos.
+round(mean(prediccion == traindata$Cumple), 4)
+```
+
+```{r}
+#| label: p2-paso7-calc
+#| echo: false
+
+aciertos <- mean(prediccion == traindata$Cumple)
+r2       <- 1 - modelo2$deviance / modelo2$null.deviance
+detecta  <- sum(prediccion == 1 & traindata$Cumple == 1) / sum(traindata$Cumple)
+```
+
+El modelo acierta en el **`r round(aciertos*100,1)` %** de los casos. Suena bien,
+pero hay que mirarlo con cuidado: como el `r round((1-tasa_cumple)*100,1)` % de
+los clientes **no** cumple, un modelo perezoso que dijera "nadie cumple" ya
+acertaría el `r round((1-tasa_cumple)*100,1)` %. Nuestro modelo mejora eso, pero
+poco.
+
+Lo más flojo es que de los `r sum(traindata$Cumple)` clientes que sí cumplen, el
+modelo solo detecta `r sum(prediccion == 1 & traindata$Cumple == 1)`
+(un `r round(detecta*100,1)` %). En resumen: **el modelo sirve para ordenar
+clientes de más a menos riesgosos, pero no para decidir solo.**
+
+```{r}
+#| label: p2-paso7-grafico
+#| fig-height: 2.4
+#| fig-cap: "Parte 2. Porcentaje de clientes que cumple, según la variable Moras. Es la diferencia más grande que encontramos en toda la base, y coincide con que Moras sea la variable más fuerte del modelo."
+
+resumen <- aggregate(Cumple ~ Moras, data = traindata, FUN = mean)
+resumen$Moras <- factor(resumen$Moras, labels = c("Moras = 0", "Moras = 1"))
+
+ggplot(resumen, aes(x = Moras, y = Cumple)) +
+  geom_col(fill = "grey70", width = 0.5) +
+  geom_text(aes(label = paste0(round(Cumple * 100, 1), " %")), vjust = -0.5,
+            size = 3) +
+  scale_y_continuous(limits = c(0, 0.55),
+                     labels = function(x) paste0(x * 100, " %")) +
+  labs(x = NULL, y = "Porcentaje que cumple") +
+  theme_minimal(base_size = 9)
+```
+
+# Conclusiones
+
+1. **Aprendí a construir un modelo logit en R** con la función `glm()`, tanto con
+   datos inventados como con la base real del curso.
+
+2. **En la Parte 1 el modelo funcionó**, pero los datos inventados tienen dos
+   cosas poco realistas: el score sube el riesgo (debería bajarlo) y el
+   `r round(tasa1*100,1)` % de incumplimiento es demasiado alto. Eso viene de la
+   fórmula que trae la guía, no de un error de programación.
+
+3. **En la Parte 2 el modelo con todas las variables falló**, y encontré la
+   razón: la columna `Ingresos` separa perfectamente a quien cumple de quien no
+   (corte en 10 millones). Al quitarla, el modelo funcionó normal.
+
+4. **En el modelo corregido, las variables que más importan son `Moras` y el
+   `Score_Crediticio`.** El estado civil no resultó confiable.
+
+5. **Lo más importante que me deja el taller:** antes de confiar en un modelo hay
+   que mirar los datos y revisar que los resultados tengan sentido. Los dos
+   problemas que encontré (el score al revés y los ingresos que lo delataban
+   todo) no los detecta ningún programa solo: hay que revisarlos uno mismo.
+
+6. **Queda una pregunta pendiente para el profesor:** ¿qué significa el 1 en la
+   columna `Moras`? Según la respuesta, la interpretación de la variable más
+   importante del modelo cambia por completo.
+
+# Referencias
+
+- Contenido del Módulo 1, *Fundamentos de Inteligencia Artificial y
+  Automatización de Procesos Financieros*.
+- Provost, F., & Fawcett, T. (2013). *Data Science for Business*. O'Reilly
+  Media, capítulos 1 y 2.
+- Base de datos `Traindata.xlsx`, aula virtual del curso, Módulo 1.
+- R Core Team (2024). *R: A Language and Environment for Statistical Computing*.
