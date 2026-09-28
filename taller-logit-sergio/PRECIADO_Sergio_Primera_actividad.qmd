@@ -288,8 +288,21 @@ ggplot(datos1, aes(x = factor(default, labels = c("Pagó", "No pagó")),
 ```{r}
 #| label: p2-paso1-cargar
 
-# read_excel() abre el archivo. Lo guardamos en la carpeta "datos".
-traindata <- as.data.frame(read_excel("datos/Traindata.xlsx"))
+# Buscamos el Excel en los dos sitios donde suele estar: dentro de la carpeta
+# "datos", o al lado de este archivo .qmd. Así funciona sin importar dónde lo
+# haya guardado uno.
+posibles <- c("datos/Traindata.xlsx", "Traindata.xlsx")
+ruta <- posibles[file.exists(posibles)][1]
+
+# Si no aparece en ninguno de los dos, avisamos con un mensaje claro en vez de
+# dejar que R lance un error difícil de entender.
+if (is.na(ruta)) {
+  stop("No encuentro Traindata.xlsx. Guárdalo en la misma carpeta que este ",
+       ".qmd (o dentro de una subcarpeta llamada 'datos') y vuelve a renderizar.")
+}
+
+# read_excel() abre el archivo de Excel.
+traindata <- as.data.frame(read_excel(ruta))
 
 # La columna "Score Crediticio" tiene un espacio en el nombre y eso incomoda
 # a R. Le cambiamos el espacio por un guion bajo.
